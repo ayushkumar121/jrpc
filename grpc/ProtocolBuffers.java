@@ -1,6 +1,6 @@
 package grpc;
 
-import java.io.File;
+import java.io.*;
 import java.nio.file.Files;
 
 import java.util.Map;
@@ -21,8 +21,8 @@ public class ProtocolBuffers {
         return new MessageObject(name);
     }
 
-    public MessageObject newMessageObject(String name, byte[] data) throws Exception {
-        return new MessageObject(name, data);
+    public MessageObject newMessageObject(String name, InputStream in) throws Exception {
+        return new MessageObject(name, in);
     }
 
     public class MessageObject {
@@ -47,9 +47,9 @@ public class ProtocolBuffers {
             this.fieldNames = new HashMap<>();
         }
 
-        private MessageObject(String name, byte[] data) throws Exception {
+        private MessageObject(String name, InputStream in) throws Exception {
             this(name);
-            deserialize(data);
+            deserialize(in);
         }
 
         public void setField(String name, Object value) {
@@ -115,7 +115,7 @@ public class ProtocolBuffers {
             return fieldNames;
         }
 
-        private void writeVarint(Buffer out, long value) throws Exception {
+        private void writeVarint(OutputStream out, long value) throws Exception {
             while ((value & ~0x7F) != 0) {
                 byte b = (byte) ((value & 0x7F) | 0x80);
                 out.write(b);
@@ -124,12 +124,12 @@ public class ProtocolBuffers {
             out.write((byte) value);
         }
 
-        private int readVarint(Buffer in) throws Exception {
+        private int readVarint(InputStream in) throws Exception {
             int result = 0;
             int shift = 0;
             while (true) {
                 try {
-                    byte b = in.read();
+                    byte b = (byte) in.read();
 
                     result |= (b & 0x7F) << shift;
                     if ((b & 0x80) == 0) {
@@ -146,11 +146,11 @@ public class ProtocolBuffers {
             }
         }
 
-        private void writeTag(Buffer out, int fieldNumber, int wireType) throws Exception {
+        private void writeTag(OutputStream out, int fieldNumber, int wireType) throws Exception {
             writeVarint(out, (fieldNumber << 3) | wireType);
         }
 
-        private void writeField(Buffer out, Integer fieldNumber, MessageField fieldDefinition, Object value) throws Exception {
+        private void writeField(OutputStream out, Integer fieldNumber, MessageField fieldDefinition, Object value) throws Exception {
             switch (fieldDefinition.type) {
                 case "int32" -> {
                     writeTag(out, fieldNumber, WIRE_TYPE_VARINT);
@@ -202,19 +202,22 @@ public class ProtocolBuffers {
                                 MessageObject obj = new MessageObject(mapDefinition.identifier);
                                 obj.setField("key", entry.getKey());
                                 obj.setField("value", entry.getValue());
-                                byte[] bytes = obj.serialize();
+
+                                ByteArrayOutputStream b = new ByteArrayOutputStream();
+                                obj.serialize(b);
 
                                 writeTag(out, fieldNumber, WIRE_TYPE_LENGTH_DELIMITED);
-                                writeVarint(out, bytes.length);
-                                out.write(bytes);
+                                writeVarint(out, b.size());
+                                out.write(b.toByteArray());
                             }
                         } else {
                             MessageObject obj = (MessageObject) value;
-                            byte[] bytes = obj.serialize();
+                            ByteArrayOutputStream b = new ByteArrayOutputStream();
+                            obj.serialize(b);
 
                             writeTag(out, fieldNumber, WIRE_TYPE_LENGTH_DELIMITED);
-                            writeVarint(out, bytes.length);
-                            out.write(bytes);
+                            writeVarint(out, b.size());
+                            out.write(b.toByteArray());
                         }
                     } else {
                         throw new Exception("Unknown field definition for: " + fieldDefinition.type);
@@ -252,10 +255,9 @@ public class ProtocolBuffers {
             }
         }
 
-        public byte[] serialize() throws Exception {
+        public void serialize(OutputStream out) throws Exception {
             assertRequiredFields();
 
-            Buffer out = new Buffer();
             for (Map.Entry<Integer, Object> entry : fieldValues.entrySet()) {
                 Integer fieldNumber = entry.getKey();
                 MessageField fieldDefinition = definition.fields.get(fieldNumber);
@@ -271,13 +273,9 @@ public class ProtocolBuffers {
                     writeField(out, fieldNumber, fieldDefinition, entry.getValue());
                 }
             }
-
-            return out.getBytes();
         }
 
-        private void deserialize(byte[] data) throws Exception {
-            Buffer in = new Buffer(data);
-
+        private void deserialize(InputStream in) throws Exception {
             while (in.available() > 0) {
                 long tag = readVarint(in);
 
@@ -295,7 +293,9 @@ public class ProtocolBuffers {
                     case WIRE_TYPE_VARINT -> value = readVarint(in);
                     case WIRE_TYPE_LENGTH_DELIMITED -> {
                         int length = readVarint(in);
-                        value = in.read(length);
+                        byte[] buf = new byte[length];
+                        in.read(buf);
+                        value = buf;
                     }
                     default -> throw new Exception("Unknown wire type: " + wireType);
                 }
@@ -309,6 +309,7 @@ public class ProtocolBuffers {
                         value = (int) value != 0;
                         break;
                     case "string":
+                        assert value instanceof byte[];
                         value = new String((byte[]) value);
                         break;
                     default: {
@@ -325,7 +326,8 @@ public class ProtocolBuffers {
                             value = (int) value;
                         } else if (fieldTypeDefinition instanceof MessageDefinition) {
                             MessageObject obj = new MessageObject(fieldDefinition.type);
-                            obj.deserialize((byte[]) value);
+                            ByteArrayInputStream a = new ByteArrayInputStream((byte[]) value);
+                            obj.deserialize(a);
                             value = obj;
                         } else {
                             throw new Exception("Unknown field definition for: " + fieldDefinition.identifier);
