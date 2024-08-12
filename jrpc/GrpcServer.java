@@ -137,7 +137,7 @@ public class GrpcServer {
 
                             HTTP2.Frame responseDataFrame = new HTTP2.Frame(
                                 HTTP2.FRAME_TYPE_DATA, 
-                                HTTP2.FLAG_END_STREAM,
+                                0x0,
                                 frame.streamId);
                             responseDataFrame.payload = responseStream.toByteArray();
                             responseDataFrame.serialize(out);
@@ -249,14 +249,14 @@ public class GrpcServer {
         List<String[]> headers = new ArrayList<>();
         headers.add(new String[] { ":status", "200" });
         headers.add(new String[] { "content-type", "application/grpc" });
-        headers.add(new String[] { "grpc-status", "0" });
-        headers.add(new String[] { "grpc-message", "OK" });
         byte[] headerData = hp.encode(headers);
         return headerData;
     }
 
     private byte[] createResponseTrailers(HPack hp) throws Exception {
         List<String[]> headers = new ArrayList<>();
+        headers.add(new String[] { "grpc-status", "0" });
+        headers.add(new String[] { "grpc-message", "OK" });
         byte[] headerData = hp.encode(headers);
         return headerData;
     }
