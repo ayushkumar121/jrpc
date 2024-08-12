@@ -1,20 +1,12 @@
-package grpc;
+package jrpc;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.FileOutputStream;
 import java.util.HashMap;
 import java.util.Map;
 
 public class TestProtocolBuffers {
-
-    public static void printBytes(String prefix, byte[] bytes) {
-        System.out.println(prefix);
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02X", b));
-        }
-        System.out.println(sb);
-    }
-
     public static void main(String[] args) {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -23,8 +15,17 @@ public class TestProtocolBuffers {
             ProtocolBuffers.MessageObject userRequest = pb.newMessageObject("UserRequest");
             userRequest.setField("id", 123);
 
+            DataOutputStream file = new DataOutputStream(new 
+                                 FileOutputStream("request.bat"));
+            file.writeByte(0);
+            file.writeByte(0);
+            file.writeByte(0);
+            file.writeByte(0);
+            file.writeByte(0);
+            userRequest.serialize(file);
             userRequest.serialize(out);
-            printBytes("User Request Bytes: ", out.toByteArray());
+
+            Utils.printBytes("User Request Bytes: ", out.toByteArray());
 
             out.reset();
 
@@ -37,7 +38,7 @@ public class TestProtocolBuffers {
 
             userResponse.setField("properties", userProperties);
             userResponse.serialize(out);
-            printBytes("User Response Bytes: ", out.toByteArray());
+            Utils.printBytes("User Response Bytes: ", out.toByteArray());
         } catch (Exception e) {
             e.printStackTrace();
         }

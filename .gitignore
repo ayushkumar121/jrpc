@@ -1,3 +1,4 @@
 .idea
 out
 mobikwik-grpc.iml
+.DS_Store

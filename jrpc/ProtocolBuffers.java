@@ -1,4 +1,4 @@
-package grpc;
+package jrpc;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -26,17 +26,17 @@ public class ProtocolBuffers {
     }
 
     public class MessageObject {
-        private Map<Integer, Object> fieldValues;
-        private Map<Integer, String> fieldNames;
-        private MessageDefinition definition;
+        private final Map<Integer, Object> fieldValues;
+        private final Map<Integer, String> fieldNames;
+        private final MessageDefinition definition;
 
         private static final int WIRE_TYPE_VARINT = 0;
-        private static final int WIRE_TYPE_FIXED64 = 1;
+        //private static final int WIRE_TYPE_FIXED64 = 1;
         private static final int WIRE_TYPE_LENGTH_DELIMITED = 2;
-        private static final int WIRE_TYPE_START_GROUP = 3;
+        /*private static final int WIRE_TYPE_START_GROUP = 3;
         private static final int WIRE_TYPE_END_GROUP = 4;
         private static final int WIRE_TYPE_FIXED32 = 5;
-
+        */
         private MessageObject(String name) throws Exception {
             Definition def = definitions.get(name);
             if (!(def instanceof MessageDefinition)) {
@@ -113,6 +113,40 @@ public class ProtocolBuffers {
 
         public Map<Integer, String> getFieldNames() {
             return fieldNames;
+        }
+
+        public void serialize(OutputStream out) throws Exception {
+            assertRequiredFields();
+
+            for (Map.Entry<Integer, Object> entry : fieldValues.entrySet()) {
+                Integer fieldNumber = entry.getKey();
+                MessageField fieldDefinition = definition.fields.get(fieldNumber);
+
+                if (fieldDefinition.modifier != MessageFieldModifier.OPTIONAL || entry.getValue() != null) {
+                    if (fieldDefinition.modifier == MessageFieldModifier.REPEATED) {
+                        Object[] values = (Object[]) entry.getValue();
+                        for (Object value : values) {
+                            writeField(out, fieldNumber, fieldDefinition, value);
+                        }
+                    } else {
+                        writeField(out, fieldNumber, fieldDefinition, entry.getValue());
+                    }
+                }
+            }
+        }
+
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+            sb.append(definition.identifier).append(" {");
+            for (Map.Entry<Integer, Object> entry : fieldValues.entrySet()) {
+                Integer fieldNumber = entry.getKey();
+                String fieldName = fieldNames.get(fieldNumber);
+                Object value = entry.getValue();
+                sb.append("\n  ").append(fieldName).append(": ").append(value);
+            }
+            sb.append("\n}");
+            return sb.toString();
         }
 
         private void writeVarint(OutputStream out, long value) throws Exception {
@@ -196,19 +230,23 @@ public class ProtocolBuffers {
 
                         if (fieldDefinition.modifier == MessageFieldModifier.MAP) {
                             MessageDefinition mapDefinition = ((MessageDefinition) fieldTypeDefinition);
-                            Map<Object, Object> mapObj = (Map) value;
+                            if (value instanceof Map<?, ?>) {
+                                Map<?, ?> mapObj = (Map<?, ?>) value;
 
-                            for (Map.Entry<Object, Object> entry : mapObj.entrySet()) {
-                                MessageObject obj = new MessageObject(mapDefinition.identifier);
-                                obj.setField("key", entry.getKey());
-                                obj.setField("value", entry.getValue());
+                                for (Map.Entry<?, ?> entry : mapObj.entrySet()) {
+                                    MessageObject obj = new MessageObject(mapDefinition.identifier);
+                                    obj.setField("key", entry.getKey());
+                                    obj.setField("value", entry.getValue());
 
-                                ByteArrayOutputStream b = new ByteArrayOutputStream();
-                                obj.serialize(b);
+                                    ByteArrayOutputStream b = new ByteArrayOutputStream();
+                                    obj.serialize(b);
 
-                                writeTag(out, fieldNumber, WIRE_TYPE_LENGTH_DELIMITED);
-                                writeVarint(out, b.size());
-                                out.write(b.toByteArray());
+                                    writeTag(out, fieldNumber, WIRE_TYPE_LENGTH_DELIMITED);
+                                    writeVarint(out, b.size());
+                                    out.write(b.toByteArray());
+                                }
+                            } else {
+                                throw new Exception("Field is map, but value is not a map");
                             }
                         } else {
                             MessageObject obj = (MessageObject) value;
@@ -255,26 +293,7 @@ public class ProtocolBuffers {
             }
         }
 
-        public void serialize(OutputStream out) throws Exception {
-            assertRequiredFields();
-
-            for (Map.Entry<Integer, Object> entry : fieldValues.entrySet()) {
-                Integer fieldNumber = entry.getKey();
-                MessageField fieldDefinition = definition.fields.get(fieldNumber);
-
-                if (fieldDefinition.modifier == MessageFieldModifier.OPTIONAL && entry.getValue() == null) {
-                    continue;
-                } else if (fieldDefinition.modifier == MessageFieldModifier.REPEATED) {
-                    Object[] values = (Object[]) entry.getValue();
-                    for (Object value : values) {
-                        writeField(out, fieldNumber, fieldDefinition, value);
-                    }
-                } else {
-                    writeField(out, fieldNumber, fieldDefinition, entry.getValue());
-                }
-            }
-        }
-
+        @SuppressWarnings("unchecked")
         private void deserialize(InputStream in) throws Exception {
             while (in.available() > 0) {
                 long tag = readVarint(in);
@@ -293,9 +312,7 @@ public class ProtocolBuffers {
                     case WIRE_TYPE_VARINT -> value = readVarint(in);
                     case WIRE_TYPE_LENGTH_DELIMITED -> {
                         int length = readVarint(in);
-                        byte[] buf = new byte[length];
-                        in.read(buf);
-                        value = buf;
+                        value = in.readNBytes(length);
                     }
                     default -> throw new Exception("Unknown wire type: " + wireType);
                 }
@@ -322,20 +339,50 @@ public class ProtocolBuffers {
                             throw new Exception("Unknown field definition for: " + fieldDefinition.identifier);
                         }
 
-                        if (fieldTypeDefinition instanceof EnumDefinition) {
-                            value = (int) value;
-                        } else if (fieldTypeDefinition instanceof MessageDefinition) {
-                            MessageObject obj = new MessageObject(fieldDefinition.type);
-                            ByteArrayInputStream a = new ByteArrayInputStream((byte[]) value);
-                            obj.deserialize(a);
-                            value = obj;
-                        } else {
-                            throw new Exception("Unknown field definition for: " + fieldDefinition.identifier);
+                        if (!(fieldTypeDefinition instanceof EnumDefinition)) {
+                            if (fieldTypeDefinition instanceof MessageDefinition) {
+                                MessageObject obj = new MessageObject(fieldDefinition.type);
+                                assert value instanceof byte[];
+                                ByteArrayInputStream a = new ByteArrayInputStream((byte[]) value);
+                                obj.deserialize(a);
+                                value = obj;
+                            } else {
+                                throw new Exception("Unknown field definition for: " + fieldDefinition.identifier);
+                            }
                         }
                     }
                 }
 
-                fieldValues.put(fieldNumber, value);
+                if (fieldDefinition.modifier == MessageFieldModifier.REPEATED) {
+                    if (fieldValues.containsKey(fieldNumber) ) {
+                        Object existingValue = fieldValues.get(fieldNumber);
+                        Object[] values = (Object[]) existingValue;
+                        Object[] newValues = new Object[values.length + 1];
+    
+                        System.arraycopy(values, 0, newValues, 0, values.length);
+                        newValues[values.length] = value;
+                        fieldValues.put(fieldNumber, newValues);
+                    } else {
+                        fieldValues.put(fieldNumber, new Object[]{value});
+                    }
+                } else if (fieldDefinition.modifier == MessageFieldModifier.MAP) {
+                    MessageObject obj = (MessageObject) value;
+
+                    Object key = obj.getField("key");
+                    Object mapValue = obj.getField("value");
+
+                    if (fieldValues.containsKey(fieldNumber)) {
+                        Map<Object, Object> map = (Map<Object, Object>) fieldValues.get(fieldNumber);
+                        map.put(key, mapValue);
+                    } else {
+                        Map<Object, Object> map = new HashMap<>();
+                        map.put(key, mapValue);
+                        fieldValues.put(fieldNumber, map);
+                    }
+                } else {
+                    fieldValues.put(fieldNumber, value);
+                }
+
                 fieldNames.put(fieldNumber, fieldDefinition.identifier);
             }
 
@@ -406,9 +453,9 @@ public class ProtocolBuffers {
         }
     }
 
-    public Syntax syntax;
-    private List<String> importPaths;
-    private Map<String, Definition> definitions;
+    private Syntax syntax;
+    private final List<String> importPaths;
+    private final Map<String, Definition> definitions;
 
     private String readEntireFile(String filePath) throws Exception {
         File file = new File(filePath);
@@ -471,14 +518,14 @@ public class ProtocolBuffers {
         REQUIRED("required"),
         ;
 
-        public String value;
+        public final String value;
 
-        private Keyword(String value) {
+        Keyword(String value) {
             this.value = value;
         }
     }
 
-    private class Token {
+    private static class Token {
         TokenType type;
         Keyword keyword;
         String value;
@@ -524,7 +571,6 @@ public class ProtocolBuffers {
                 }
             } else if (Character.isWhitespace(ch)) {
                 i++;
-                continue;
             } else if (isPunctuation(ch)) {
                 if (ch == ';') {
                     Token token = new Token();
@@ -622,7 +668,7 @@ public class ProtocolBuffers {
         return tokens;
     }
 
-    private class Parser {
+    private static class Parser {
         private final ArrayList<Token> tokens;
         private int index;
 
@@ -632,10 +678,7 @@ public class ProtocolBuffers {
         }
 
         public boolean expect(TokenType type) {
-            if (index < tokens.size() && tokens.get(index).type == type) {
-                return true;
-            }
-            return false;
+            return index < tokens.size() && tokens.get(index).type == type;
         }
 
         public Optional<Token> peek() {
