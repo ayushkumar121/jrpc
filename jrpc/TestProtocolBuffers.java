@@ -12,7 +12,7 @@ public class TestProtocolBuffers {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             ProtocolBuffers pb = new ProtocolBuffers("test.proto");
 
-            ProtocolBuffers.MessageObject userRequest = pb.newMessageObject("UserRequest");
+            MessageObject userRequest = new MessageObject(pb, "UserRequest");
             userRequest.setField("id", 123);
 
             DataOutputStream file = new DataOutputStream(new 
@@ -29,7 +29,7 @@ public class TestProtocolBuffers {
 
             out.reset();
 
-            ProtocolBuffers.MessageObject userResponse = pb.newMessageObject("UserResponse");
+            MessageObject userResponse = new MessageObject(pb, "UserRequest");
             userResponse.setField("id", 123);
             userResponse.setField("name", "John Doe");
 

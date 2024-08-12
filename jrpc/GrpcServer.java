@@ -8,15 +8,32 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import jrpc.ProtocolBuffers.Definition;
+import jrpc.ProtocolBuffers.ServiceDefinition;
+import jrpc.ProtocolBuffers.ServiceMethodDefinition;
+
 public class GrpcServer {
     private static final int PORT = 8080;
     private static final int THREAD_POOL_SIZE = 10;
 
     private ProtocolBuffers pb;
+    private Map<String, GrpcHandler> handlers;
+    private Map<String, ServiceMethodDefinition> grpcMethods;
 
-    public GrpcServer(String protocolBufferFilePath) throws Exception {
-        pb = new ProtocolBuffers(protocolBufferFilePath);
-        System.err.println("INFO: Server is starting...");
+    public GrpcServer(ProtocolBuffers pb, Map<String, GrpcHandler> handlers) throws Exception {
+        this.pb = pb;
+        this.handlers = handlers;
+        this.grpcMethods = new HashMap<>();
+
+        for (Map.Entry<String, Definition> entry : pb.getDefinitions().entrySet()) {
+            if (entry.getValue() instanceof ServiceDefinition) {
+                ServiceDefinition serviceDefinition = (ServiceDefinition) entry.getValue();
+                for (Map.Entry<String, ServiceMethodDefinition> methodEntry : serviceDefinition.methods.entrySet()) {
+                    ServiceMethodDefinition method = methodEntry.getValue();
+                    grpcMethods.put("/" + entry.getKey() + "/" + methodEntry.getKey(), method);
+                }
+            }
+        }
     }
 
     public void start() throws Exception {
@@ -31,7 +48,7 @@ public class GrpcServer {
         }
     }
 
-    public void handleClient(Socket client) {
+    private void handleClient(Socket client) {
         try {
             InputStream in = client.getInputStream();
             OutputStream out = client.getOutputStream();
@@ -58,8 +75,8 @@ public class GrpcServer {
             int lastStreamId = -1;
 
             // Map to store streamId and grpc method mapping
-            Map<Integer, String> grpcMethodMap = new HashMap<>();
-            Map<Integer, ProtocolBuffers.MessageObject> requestMap = new HashMap<>();
+            Map<Integer, String> grpcPath = new HashMap<>();
+            Map<Integer, MessageObject> requestMap = new HashMap<>();
 
             while (!terminate) {
                 HTTP2.Frame frame = new HTTP2.Frame(in);
@@ -75,11 +92,19 @@ public class GrpcServer {
                             headers.addAll(hp.decode(new HTTP2.Frame(in).payload));
                         }
 
-                        headers.forEach(header -> {
+                        for (String[] header : headers) {
                             if (header[0].equals(":path")) {
-                                grpcMethodMap.put(frame.streamId, header[1]);
+                                String path = header[1];
+                                if (!grpcMethods.containsKey(path)) {
+                                    sendGoAwayFrame(out, lastStreamId, HTTP2.ERROR_INTERNAL_ERROR, "Method not found");
+                                    terminate = true;
+                                    break;
+                                }
+
+                                grpcPath.put(frame.streamId, path);
+                                break;
                             }
-                        });
+                        }
                     }
                     break;
 
@@ -93,63 +118,74 @@ public class GrpcServer {
                                 break;
                             }
 
-                            // TODO: Dispatch the correct method based on the grpcMethodMap
-                            ProtocolBuffers.MessageObject request = pb.newMessageObject("UserRequest", dataStream);
+                            String path = grpcPath.get(frame.streamId);
+                            ServiceMethodDefinition serviceMethod = grpcMethods.get(path);
+                            if (serviceMethod == null) {
+                                sendGoAwayFrame(out, lastStreamId, HTTP2.ERROR_INTERNAL_ERROR, "Method not found");
+                                terminate = true;
+                                break;
+                            }
 
+                            MessageObject request = new MessageObject(pb, serviceMethod.inputIdentifier, dataStream);
                             requestMap.put(frame.streamId, request);
                         }
 
                         if (frame.flag == HTTP2.FLAG_END_STREAM) {
-                            ProtocolBuffers.MessageObject request = requestMap.get(frame.streamId);
+                            MessageObject request = requestMap.get(frame.streamId);
                             if (request == null) {
                                 sendGoAwayFrame(out, lastStreamId, HTTP2.ERROR_PROTOCOL_ERROR, "Invalid data frame");
                                 terminate = true;
                                 break;
                             }
-                            System.err.println("Object Received: " + request);
 
+                            try {
+                                String path = grpcPath.get(frame.streamId);
+                                GrpcHandler handler = handlers.get(path);
+                                if (handler == null) {
+                                    sendGoAwayFrame(out, lastStreamId, HTTP2.ERROR_INTERNAL_ERROR, "Handler not found");
+                                    terminate = true;
+                                    break;
+                                }
 
-                            HTTP2.Frame responseHeaderFrame = new HTTP2.Frame(
-                                HTTP2.FRAME_TYPE_HEADERS,
-                                HTTP2.FLAG_END_HEADERS, 
-                                frame.streamId);
-                            responseHeaderFrame.payload = createResponseHeaders(hp);
-                            responseHeaderFrame.serialize(out);
+                                MessageObject response = handler.apply(request);
+                                ByteArrayOutputStream responseData = new ByteArrayOutputStream();
+                                response.serialize(responseData);
 
-                            ProtocolBuffers.MessageObject response = pb.newMessageObject("UserResponse");
-                            response.setField("id", request.getField("id"));
-                            response.setField("name", "John Doe");
+                                // Sending response headers
+                                HTTP2.Frame responseHeaderFrame = new HTTP2.Frame(
+                                    HTTP2.FRAME_TYPE_HEADERS,
+                                    HTTP2.FLAG_END_HEADERS, 
+                                    frame.streamId);
+                                responseHeaderFrame.payload = createResponseHeaders(hp);
+                                responseHeaderFrame.serialize(out);
 
-                            Map<String, String> userRoles = new HashMap<>();
-                            userRoles.put("admin", "true");
-                            userRoles.put("editor", "true");
-                            response.setField("properties", userRoles);
+                                // Sending response data
+                                ByteArrayOutputStream responseStream = new ByteArrayOutputStream();
+                                responseStream.write(0); // No compression
+                                responseStream.write(Utils.unpack(responseData.size(), 4));
+                                responseStream.write(responseData.toByteArray()); 
+                                
+                                HTTP2.Frame responseDataFrame = new HTTP2.Frame(
+                                    HTTP2.FRAME_TYPE_DATA, 
+                                    0x0,
+                                    frame.streamId);
+                                responseDataFrame.payload = responseStream.toByteArray();
+                                responseDataFrame.serialize(out);
 
-                            System.err.println("Object Sent: " + response);
+                                // Sending response trailers
+                                HTTP2.Frame responseTrailerFrame = new HTTP2.Frame(
+                                    HTTP2.FRAME_TYPE_HEADERS,
+                                    HTTP2.FLAG_END_HEADERS | HTTP2.FLAG_END_STREAM, 
+                                    frame.streamId);
+                                responseTrailerFrame.payload = createResponseTrailers(hp);
+                                responseTrailerFrame.serialize(out);
 
-                            ByteArrayOutputStream responseData = new ByteArrayOutputStream();
-                            response.serialize(responseData);
-
-                            ByteArrayOutputStream responseStream = new ByteArrayOutputStream();
-                            responseStream.write(0); // No compression
-                            responseStream.write(Utils.unpack(responseData.size(), 4));
-                            responseStream.write(responseData.toByteArray());
-
-                            HTTP2.Frame responseDataFrame = new HTTP2.Frame(
-                                HTTP2.FRAME_TYPE_DATA, 
-                                0x0,
-                                frame.streamId);
-                            responseDataFrame.payload = responseStream.toByteArray();
-                            responseDataFrame.serialize(out);
-
-                            HTTP2.Frame responseTrailerFrame = new HTTP2.Frame(
-                                HTTP2.FRAME_TYPE_HEADERS,
-                                HTTP2.FLAG_END_HEADERS | HTTP2.FLAG_END_STREAM, 
-                                frame.streamId);
-                            responseTrailerFrame.payload = createResponseTrailers(hp);
-                            responseTrailerFrame.serialize(out);
-
-                            terminate = true;
+                                terminate = true;
+                            } catch (Exception ex) {
+                                sendGoAwayFrame(out, lastStreamId, HTTP2.ERROR_INTERNAL_ERROR, "Internal error");
+                                terminate = true;
+                                break;
+                            }
                         }
                     }
                     break;
@@ -198,12 +234,7 @@ public class GrpcServer {
     }
 
     private void logFrameDetails(HTTP2.Frame frame) {
-        System.err.println("Frame Details:");
-        System.err.println("  Length: " + frame.payload.length);
-        System.err.println("  Type: " + frame.type);
-        System.err.println("  Flags: " + frame.flag);
-        System.err.println("  Stream ID: " + frame.streamId);
-        System.err.println("  Payload: " + Arrays.toString(frame.payload));
+        System.err.println("INFO: Frame received "+ frame.type + " : " + frame.flag + " : " + frame.streamId);
     }
 
     private void sendGoAwayFrame(OutputStream out, int streamId, int errorCode, String debugData) throws IOException {

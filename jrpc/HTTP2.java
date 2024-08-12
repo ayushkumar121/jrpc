@@ -28,6 +28,7 @@ public class HTTP2 {
 
     public static final int ERROR_NO_ERROR = 0x0;
     public static final int ERROR_PROTOCOL_ERROR = 0x1;
+    public static final int ERROR_INTERNAL_ERROR = 0x2;
 
     public static class Frame {
         public int type;
